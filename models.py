@@ -14,10 +14,10 @@ import utils
 import data_utils
 
 class CompQAModel(object):
-    def __init__(self, vocab_size = 10000, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
+    def __init__(self, vocab_size = 50, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
                  state_size=500, num_layers=1, num_samples=64,
                  max_grad_norm=5.0, is_train=True, cell_type='LSTM',
-                 optimizer_name='Adam', learning_rate=0.05):
+                 optimizer_name='Adam', learning_rate=0.001):
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
         self.max_src_len = max_src_len
@@ -48,15 +48,14 @@ class CompQAModel(object):
     def _define_graph(self):
         # why max_src_len is the first argument? -- because this code performs time_major, a little bit faster than batch_major
         self.encoder_inputs = tf.placeholder(tf.int32, [self.max_src_len, None], 'encoder_inputs')
-        print("shape of encoder inputs: ", self.encoder_inputs.shape)
         self.encoder_lengths = tf.placeholder(tf.int32, [None], 'encoder_lengths')
-        # what is this?
+        # what is this? -- facts 
         self.facts_inputs = tf.placeholder(tf.int32, [self.max_fact_num, 2, None], 'input_facts')
 
         self.decoder_inputs = tf.placeholder(tf.int32, [self.max_des_len + 2, None], 'decoder_inputs')
-        # what is this?   
+        # what is this? -- if copy from source sentence, decide which position
         self.decoder_sources = tf.placeholder(tf.int32, [self.max_des_len + 2, self.max_src_len, None], 'decoder_sources')
-        # what is this?   
+        # what is this? -- if copy from kb, decide which position
         self.decoder_kbkbs = tf.placeholder(tf.int32, [self.max_des_len + 2, self.max_fact_num, None], 'decoder_kbkbs')
         self.decoder_modes = tf.placeholder(tf.int32, [self.max_des_len + 2, 3, None], 'decoder_modes')
 
@@ -66,14 +65,14 @@ class CompQAModel(object):
         # -- TB test 
         with tf.device("/cpu:0"):
             embedded_encoder_inputs = tf.nn.embedding_lookup(self.embeddings, self.encoder_inputs)
-            print("size of encoder inputs, before unstack: ", embedded_encoder_inputs.shape)
+            print("size of encoder inputs: ", embedded_encoder_inputs.shape)
             # embedded_encoder_inputs = tf.unstack(embedded_encoder_inputs)
             # print("encoder inputs: ", len(embedded_encoder_inputs), embedded_encoder_inputs[0].shape)
         self.input_output_size = self.state_size * 2
         self.input_state_size = self.state_size * 2
         if self.cell_type.lower() == 'lstm':
-            cell_fw = tf.nn.rnn_cell.BasicLSTMCell(self.state_size, state_is_tuple=False)
-            cell_bw = tf.nn.rnn_cell.BasicLSTMCell(self.state_size, state_is_tuple=False)
+            cell_fw = tf.nn.rnn_cell.BasicLSTMCell(self.state_size, state_is_tuple=True)
+            cell_bw = tf.nn.rnn_cell.BasicLSTMCell(self.state_size, state_is_tuple=True)
             self.input_state_size *= 2
         elif self.cell_type.lower() == 'gru':
             cell_fw = rnn_cell.GRUCell(self.state_size)
@@ -81,14 +80,15 @@ class CompQAModel(object):
         else:
             cell_fw = tf.nn.rnn_cell.BasicRNNCell(self.state_size)
             cell_bw = tf.nn.rnn_cell.BasicRNNCell(self.state_size)
-        (output_fw, output_bw), (output_state_fw, output_state_bw) = tf.nn.bidirectional_dynamic_rnn(
+        (output_fw, output_bw), ((output_state_fw_c, output_state_fw_h), (output_state_bw_c, output_state_bw_h)) = tf.nn.bidirectional_dynamic_rnn(
             cell_fw, cell_bw, embedded_encoder_inputs, sequence_length=self.encoder_lengths, dtype=dtypes.float32, time_major = True)
         print("output size: ", output_fw.shape, output_fw.shape)
         self.encoder_outputs = tf.concat([output_fw, output_bw], 2)
         print("after concat: ", self.encoder_outputs.shape)
         self.encoder_outputs = tf.unstack(self.encoder_outputs)
         print("after unstack, length = ", len(self.encoder_outputs), "shape: ", self.encoder_outputs[0].shape)
-        self.encoder_states = tf.concat([output_state_fw, output_state_bw], 1)
+        print("state size: ", output_state_fw_c.shape)
+        self.encoder_states = tf.concat([output_state_fw_c, output_state_fw_h, output_state_bw_c, output_state_bw_h], 1)
         print("states after concat: ", self.encoder_states.shape)
         print("question processing finished .... ")
         #####################################################################
@@ -120,7 +120,8 @@ class CompQAModel(object):
         self.output_output_size = self.input_output_size
         self.output_state_size = self.input_output_size
         if self.cell_type.lower() == 'lstm':
-            cell_out = tf.nn.rnn_cell.BasicLSTMCell(self.input_output_size, state_is_tuple=False)
+            print("cell_out, input size = %d" % self.input_output_size)
+            cell_out = tf.nn.rnn_cell.BasicLSTMCell(self.input_output_size, state_is_tuple=True)
             self.output_state_size *= 2
         elif self.cell_type.lower() == 'gru':
             cell_out = rnn_cell.GRUCell(self.input_output_size)
@@ -164,8 +165,6 @@ class CompQAModel(object):
             if(verbose): print("inputs length ", len(_inputs), " shape ", _inputs[0].shape)
             _inputs = [tf.matmul(_one, source_atten_mlp_w2) for _one in _inputs]
             if(verbose): print("inputs length ", len(_inputs), " shape ", _inputs[0].shape)
-#            _inputs = [tf.squeeze(_one) for _one in _inputs] # [batch, 1]
-#            if(verbose): print("inputs length ", len(_inputs), " shape ", _inputs[0].shape)
             _inputs = tf.stack(_inputs)  #[seq, batch]
             if(verbose): print("in attention, after stack: ", _inputs.shape)
             _inputs = tf.reshape(_inputs, [self.max_src_len, -1]) #没有进行softmax
@@ -235,7 +234,9 @@ class CompQAModel(object):
             modes_seq = [tf.transpose(_one) for _one in tf.unstack(self.decoder_modes)][:-1] #[batch, 3]
             print("modes_seq, len ", len(modes_seq), "shape ", modes_seq[0].shape)
 
-            state = self.encoder_states  # [batch, out_state_size]
+            decoder_state_c = tf.concat([output_state_fw_c, output_state_bw_c], 1)# [batch, out_state_size]
+            decoder_state_h = tf.concat([output_state_fw_h, output_state_bw_h], 1)# [batch, out_state_size]
+            state = (decoder_state_c, decoder_state_h)
 
             source_state = tf.zeros((tf.shape(self.encoder_inputs)[1], self.max_src_len))
             kb_state = tf.zeros((tf.shape(self.encoder_inputs)[1], self.max_fact_num))
@@ -264,7 +265,12 @@ class CompQAModel(object):
                 if(i == 1): print("kb state shape: ", kb_state.shape)
                 kb_state = tf.reshape(kb_state, [-1, self.max_fact_num])
                 if(i == 1): print("after reshape: ", kb_state.shape)
-                output, state = cell_out(tf.concat([inp, source_state, kb_state, avg_embedded_facts], 1), state)
+                if(i == 1): print("inp shape:", inp.shape)
+                if(i == 1): print("state shape: ", state[0].shape)
+                concated_inp = tf.concat([inp, source_state, kb_state, avg_embedded_facts], 1)
+                if(i == 1): print("concated input shape: ", concated_inp.shape)
+                if(i == 1): print(type(concated_inp), type(state))
+                output, state = cell_out(concated_inp, state)
                 if(i == 1): print("output shape: ", output.shape)
                 if loop_function is not None:
                     prev = output
@@ -280,7 +286,7 @@ class CompQAModel(object):
 
                 #预测的模识
                 # pred_modes = mode_comp(state) #[batch, 3]
-                pred_modes = mode_comp(tf.concat([inp, state], 1))  # [batch, 3]
+                pred_modes = mode_comp(tf.concat([inp, state[0], state[1]], 1))  # [batch, 3]
                 # pred_modes = mode_comp(inp)  # [batch, 3]
 
                 # pred_mode_crossent = tf.nn.softmax_cross_entropy_with_logits(pred_modes, tf.cast(modes, tf.float32))
@@ -291,7 +297,7 @@ class CompQAModel(object):
                 if(i == 1): print("shape of weights", weights.shape)
                 decoder_mode_loss.append(pred_mode_crossent * weights)
 
-                pred_modes = tf.reshape(pred_modes, [-1, 3])
+                if(i == 1): print("shape of pred_modes: ", pred_modes.shape)
                 pred_common_mode, pred_source_mode, pred_kb_mode = tf.unstack(tf.transpose(pred_modes))
 
                 # 训练的时候
@@ -317,11 +323,11 @@ class CompQAModel(object):
 
                 verbose = False
                 if(i == 1): verbose = True
-                source_logit = source_atten_comp(tf.concat([state, hist_source_logit], 1), verbose)  # [batch, seq]
+                source_logit = source_atten_comp(tf.concat([state[0], state[1], hist_source_logit], 1), verbose)  # [batch, seq]
                 hist_source_logit += source_logit
                 # hist_source_logit = source_logit
 
-                kbkb_logit = kbkb_atten_comp(tf.concat([state, hist_kbkb_logit], 1), verbose)  # [batch, fact]
+                kbkb_logit = kbkb_atten_comp(tf.concat([state[0], state[1], hist_kbkb_logit], 1), verbose)  # [batch, fact]
                 hist_kbkb_logit += kbkb_logit
                 # hist_kbkb_logit = kbkb_logit
 
@@ -370,7 +376,7 @@ class CompQAModel(object):
         self.update = optimizer.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
 
         with tf.device("/cpu:0"):
-            self.saver = tf.train.Saver(tf.all_variables(), max_to_keep=10)
+            self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=10)
 
     def initilize(self, model_dir, session=None):
         ckpt = tf.train.get_checkpoint_state(model_dir)
@@ -379,7 +385,7 @@ class CompQAModel(object):
             self.saver.restore(session, ckpt.model_checkpoint_path)
         else:
             print("Creating model with fresh parameters.")
-            session.run(tf.initialize_all_variables())
+            session.run(tf.global_variables_initializer())
 
     def test(self, dataloader, model_dir):
         config = tf.ConfigProto(allow_soft_placement=True)

@@ -16,9 +16,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 parser = argparse.ArgumentParser()
 arg = parser.add_argument
 # this --data-path is expecting a file, not a directory 
-arg('--data-path', default="/home/fuyao/cas_qa/syndata/")
+arg('--data-path', default="..//syndata/")
 arg('--cell', default='lstm', help='cell type: lstm, gru')
-arg('--model-path', default="/home/fuyao/cas_qa/saved/")
+arg('--model-path', default="../saved/")
 
 arg('--embedding-size', type=int, default=300)
 arg('--vocab-min-frq', type=int, default=0)
@@ -40,13 +40,13 @@ def main():
     print "save mode to : ", args.model_path
 
     dump_path = os.path.join(args.data_path, "syncompqa_data_%d.pkl" % args.vocab_min_frq)
-#    if not os.path.exists(dump_path):
-#        dataloader = data_utils.DataLoader(args.data_path, args.vocab_min_frq)
-#        cPickle.dump(dataloader, open(dump_path, "wb"))
-#    else:
-#        dataloader = cPickle.load(open(dump_path, "rb"))
-#    print "train instance: ", len(dataloader.train_data)
-#    print "vocab size: ", dataloader.vocab_size
+    if not os.path.exists(dump_path):
+        dataloader = data_utils.DataLoader(args.data_path, args.vocab_min_frq)
+        cPickle.dump(dataloader, open(dump_path, "wb"))
+    else:
+        dataloader = cPickle.load(open(dump_path, "rb"))
+    print "train instance: ", len(dataloader.train_data)
+    print "vocab size: ", dataloader.vocab_size
 
     print("start to build the model .. ")
     model = models.CompQAModel(state_size = args.state_size, 
@@ -64,7 +64,7 @@ def main():
 #                               args.max_gradient_norm, True, args.cell,
 #                               args.optimizer, args.learning_rate)
     print "begining to train model .. "
-    # model.fit(dataloader, args.batch_size, args.epoch_size, args.checkpoint_step, args.model_path)
+    model.fit(dataloader, args.batch_size, args.epoch_size, args.checkpoint_step, args.model_path)
 
 
 def test():

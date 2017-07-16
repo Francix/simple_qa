@@ -164,6 +164,7 @@ class DataLoader(object):
             data = list()
             print "load data from ", name
             with codecs.open(os.path.join(self.data_path, '%s_data' % name), 'rb', 'utf-8') as f:
+                debug = 1
                 for line in f:
                     terms = [w.strip() for w in line.split('\t')]
                     if len(terms) < 2:
@@ -179,6 +180,9 @@ class DataLoader(object):
                     for rel, obj in ent_facts:
                         rel_id = self.vocab.get(rel, PAD_ID)
                         obj_id = self.vocab.get(obj, PAD_ID)
+                        if(debug == 1):
+                            print("obj = %s, padid = %d" % (obj, PAD_ID))
+                            debug += 1
                         cand_fact_ids.append((rel_id, obj_id))
                         real_facts.append((rel, obj))
                     for i in range(self.max_fact_num - len(ent_facts)):
@@ -306,7 +310,7 @@ class DataLoader(object):
             #       decoder_weights, inst_ques_words, inst_real_facts
 
 if __name__ == '__main__':
-    data_path = '/home/fuyao/cas_qa/syndata/'
+    data_path = '../syndata/'
     min_frq = 0
 
     # dataloader = DataLoader(data_path, min_frq)
