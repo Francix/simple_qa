@@ -14,7 +14,7 @@ import utils
 import data_utils
 
 class CompQAModel(object):
-    def __init__(self, vocab_size = 50, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
+    def __init__(self, vocab_size = 44, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
                  state_size=500, num_layers=1, num_samples=64,
                  max_grad_norm=5.0, is_train=True, cell_type='LSTM',
                  optimizer_name='Adam', learning_rate=0.001):
@@ -140,7 +140,6 @@ class CompQAModel(object):
         self.norm_loss += tf.nn.l2_loss(B_all)
 
         #输入(prev, loc1, loc2)表示上一步预测的词ID和从源句子和KB中copy的位置
-        # What is this?
         def loop_function(prev, _):
             prev = tf.matmul(prev, output_projection[0]) + output_projection[1]
             prev_symbol = tf.argmax(prev, 1) #[batch_size]
@@ -269,7 +268,6 @@ class CompQAModel(object):
                 if(i == 1): print("state shape: ", state[0].shape)
                 concated_inp = tf.concat([inp, source_state, kb_state, avg_embedded_facts], 1)
                 if(i == 1): print("concated input shape: ", concated_inp.shape)
-                if(i == 1): print(type(concated_inp), type(state))
                 output, state = cell_out(concated_inp, state)
                 if(i == 1): print("output shape: ", output.shape)
                 if loop_function is not None:
@@ -432,9 +430,10 @@ class CompQAModel(object):
 
                     gold_questions.append(''.join(ques_words[i])) #真实问题
                     pred_answers.append(''.join(words)) #预测结果
-                    print '%s\t%s\t%s' % (utils.ids_to_sentence(input.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
-                                          utils.ids_to_sentence(output.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
-                                          ''.join(words))
+                    print('question: %s\ngolden: %s\npredict: %s' % (
+                      utils.ids_to_sentence(input.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
+                      utils.ids_to_sentence(output.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
+                      ''.join(words)))
                 # break
             #开始测试
             import evaluation
@@ -473,27 +472,31 @@ class CompQAModel(object):
             for epoch in xrange(1, epoch_size + 1):
                 epoch_start = time.time()
                 loss_sum = 0
+                validation_loss_sum = 0
                 run_id, loss_run = 0, 0
                 start = time.time()
                 for ques, ques_lens, facts, resp, source, kbkb, modes, weights, _, _ in \
                         dataloader.get_train_batchs(batch_size):
-                    _, step_loss = self.step(ques, ques_lens, facts, resp, source, kbkb, modes, weights, True, session)
+                    _, step_loss = self.step(ques, ques_lens, facts, resp, 
+                        source, kbkb, modes, weights, True, session)
                     loss_sum += step_loss
-                    loss_run += step_loss
+                    los_run += step_loss
                     run_id += 1
                     if run_id % 100 == 0:
                         print "run %d loss %.5f time %.2f" % (run_id, loss_run, time.time() - start)
                         start = time.time()
                         loss_run = 0
-                        self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step=self.global_step)
+                        # self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step = self.global_step)
                         for _ques, _ques_lens, _facts, _resp, _source, _kbkb, _modes, _weights, _, _ in \
                                 dataloader.get_valid_batchs(20):
                             predict_truths, step_loss = self.step(_ques, _ques_lens, _facts,
                                                                   _resp, _source, _kbkb, _modes, _weights,
                                                                   False, session, dataloader)
                             print "validation-loss %.5f" % step_loss
+                            validation_loss_sum += step_loss
                             break
-                if epoch % step_per_checkpoint == 0:
-                    self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step=self.global_step)
+#                if epoch % step_per_checkpoint == 0:
+#                    self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step=self.global_step)
+                self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step=epoch)
                 epoch_finish = time.time()
-                print "epoch %d loss %.5f time %.2f" % (epoch, loss_sum, epoch_finish - epoch_start)
+                print "---- epoch %d loss %.5f, validation loss = %.5f, time %.2f" % (epoch, loss_sum, validation_loss_sum,epoch_finish - epoch_start)

@@ -10,13 +10,13 @@ import data_utils
 import models
 from utils import *
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 parser = argparse.ArgumentParser()
 arg = parser.add_argument
 # this --data-path is expecting a file, not a directory 
-arg('--data-path', default="..//syndata/")
+arg('--data-path', default="../syndata/")
 arg('--cell', default='lstm', help='cell type: lstm, gru')
 arg('--model-path', default="../saved/")
 
@@ -93,7 +93,7 @@ def test():
     pass
 
 if __name__ == '__main__':
-    main()
-    # test()
+    # main()
+    test()
 
     pass

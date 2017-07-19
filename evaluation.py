@@ -8,7 +8,7 @@ import codecs
 import os
 import random
 
-def load_kb(file_name="/home/hesz/complexqa/syndata/kb_facts_zero_shot_data"):
+def load_kb(file_name="../syndata/kb_facts_zero_shot_data"):
     ent_facts = dict() #key为实体，facts为dict
     with codecs.open(file_name, encoding='utf-8') as f:
         for line in f:
@@ -94,7 +94,7 @@ def eval(predicts, kbs=None):
     if kbs is None:
         kbs = load_kb()
     questions, answers = list(), list()
-    with codecs.open("/home/hesz/complexqa/syndata/qa_pairs_zero_shot_data", encoding='utf-8') as f:
+    with codecs.open("../syndata/qa_pairs_zero_shot_data", encoding='utf-8') as f:
         for line in f:
             terms = line.strip().split('\t')
             if len(terms) < 2:
