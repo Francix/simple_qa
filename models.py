@@ -129,22 +129,33 @@ class CompQAModel(object):
             cell_out = tf.nn.rnn_cell.BasicRNNCell(self.input_output_size)
 
         ###用于对输出状态预测目标词
-        W1 = tf.get_variable("proj_w1", [self.output_output_size, self.vocab_size])
-        B1 = tf.get_variable("proj_b1", [self.vocab_size])
-        W2 = tf.get_variable("proj_w2", [self.output_output_size, self.max_src_len + self.max_fact_num])
-        B2 = tf.get_variable("proj_b2", [self.max_src_len + self.max_fact_num])
-        W_all = tf.concat([W1, W2], 1)
-        B_all = tf.concat([B1, B2], 0)
-        output_projection = (W_all, B_all)
-        self.norm_loss += tf.nn.l2_loss(W_all)
-        self.norm_loss += tf.nn.l2_loss(B_all)
+        # W1 = tf.get_variable("proj_w1", [self.output_output_size, self.vocab_size])
+        # B1 = tf.get_variable("proj_b1", [self.vocab_size])
+        # W2 = tf.get_variable("proj_w2", [self.output_output_size, self.max_src_len + self.max_fact_num])
+        # B2 = tf.get_variable("proj_b2", [self.max_src_len + self.max_fact_num])
+        # W_all = tf.concat([W1, W2], 1)
+        # B_all = tf.concat([B1, B2], 0)
+        # output_projection = (W_all, B_all)
+        # output_projection = (W1, B1)
+        # self.norm_loss += tf.nn.l2_loss(W_all)
+        # self.norm_loss += tf.nn.l2_loss(B_all)
 
-        #输入(prev, loc1, loc2)表示上一步预测的词ID和从源句子和KB中copy的位置
-        def loop_function(prev, _):
-            prev = tf.matmul(prev, output_projection[0]) + output_projection[1]
-            prev_symbol = tf.argmax(prev, 1) #[batch_size]
-            emb_prev = tf.nn.embedding_lookup(self.embeddings, prev_symbol) #[batch_size, embedding_size]
-            return emb_prev
+        # 输入(prev, loc1, loc2)表示上一步预测的词ID和从源句子和KB中copy的位置
+        # obsolete
+#        def loop_function(prev, _):
+#            prev = tf.matmul(prev, output_projection[0]) + output_projection[1]
+#            prev_symbol = tf.argmax(prev, 1) #[batch_size]
+#            emb_prev = tf.nn.embedding_lookup(self.embeddings, prev_symbol) #[batch_size, embedding_size]
+#            return emb_prev
+
+        # two types of new loop functions
+        def loop_same(prev):
+            return prev
+
+        def loop_projection(prev, mode):
+            return prev
+
+        loop_function = loop_same
 
         #对源句子进行attention
         source_atten_state_size = self.output_state_size + self.input_output_size + self.max_src_len
@@ -246,14 +257,20 @@ class CompQAModel(object):
             decoder_logits = []
             decoder_predicts = []
             outputs = []
-            prev = None
+            # look up embeddings for _GO
+            prev = tf.nn.embedding_lookup(self.embeddings, tf.unstack(self.decoder_inputs)[0])
+            print("size of first decoder inputs: ", prev.shape)
             decoder_loss, decoder_mode_loss = [], []
             print("starting end2end decoding ... ")
             for i, inp in enumerate(embedded_decoder_inputs[:-1]):  # 输出端的每个输入词，第一个是GO
                 if not self.is_train and loop_function is not None and prev is not None:  # 测试的时候才用
                     # question: why I should use this "with" statement?
                     with tf.variable_scope("loop_function", reuse=True):
-                        inp = loop_function(prev, i)
+                        inp = loop_function(prev)
+                if(self.is_train):
+                    inp = loop_function(prev)
+
+                # important!
                 if i > 0:
                     tf.get_variable_scope().reuse_variables()
 

@@ -64,7 +64,7 @@ def main():
 #                               args.max_gradient_norm, True, args.cell,
 #                               args.optimizer, args.learning_rate)
     print "begining to train model .. "
-    model.fit(dataloader, args.batch_size, args.epoch_size, args.checkpoint_step, args.model_path)
+    # model.fit(dataloader, args.batch_size, args.epoch_size, args.checkpoint_step, args.model_path)
 
 
 def test():
