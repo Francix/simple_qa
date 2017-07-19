@@ -13,6 +13,14 @@ import os
 import utils
 import data_utils
 
+class ModeMeasure(object):
+  def __init__(self):
+    return
+  def accumulate(self, mm):
+    return
+  def show(self):
+    return
+
 class CompQAModel(object):
     def __init__(self, vocab_size = 44, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
                  state_size=500, num_layers=1, num_samples=64,
@@ -129,14 +137,16 @@ class CompQAModel(object):
             cell_out = tf.nn.rnn_cell.BasicRNNCell(self.input_output_size)
 
         ###用于对输出状态预测目标词
-        # W1 = tf.get_variable("proj_w1", [self.output_output_size, self.vocab_size])
-        # B1 = tf.get_variable("proj_b1", [self.vocab_size])
+        W1 = tf.get_variable("proj_w1", [self.output_output_size, self.vocab_size])
+        B1 = tf.get_variable("proj_b1", [self.vocab_size])
         # W2 = tf.get_variable("proj_w2", [self.output_output_size, self.max_src_len + self.max_fact_num])
         # B2 = tf.get_variable("proj_b2", [self.max_src_len + self.max_fact_num])
         # W_all = tf.concat([W1, W2], 1)
         # B_all = tf.concat([B1, B2], 0)
         # output_projection = (W_all, B_all)
-        # output_projection = (W1, B1)
+        output_projection = (W1, B1)
+        self.norm_loss += tf.nn.l2_loss(W1)
+        self.norm_loss += tf.nn.l2_loss(B1)
         # self.norm_loss += tf.nn.l2_loss(W_all)
         # self.norm_loss += tf.nn.l2_loss(B_all)
 
@@ -212,7 +222,7 @@ class CompQAModel(object):
             return _inputs
 
         #对使用mode进行预测
-        mode_comp_state_size = self.output_state_size + self.embedding_size
+        mode_comp_state_size = self.output_state_size + self.input_output_size
         # mode_comp_state_size = self.embedding_size
         mode_mlp_w1 = tf.Variable(tf.truncated_normal([mode_comp_state_size, 200], stddev=0.1),
                                   name="MODE_MLP_W1")
@@ -258,9 +268,12 @@ class CompQAModel(object):
             decoder_predicts = []
             outputs = []
             # look up embeddings for _GO
-            prev = tf.nn.embedding_lookup(self.embeddings, tf.unstack(self.decoder_inputs)[0])
+            # prev = tf.nn.embedding_lookup(self.embeddings, tf.unstack(self.decoder_inputs)[0])
+            # size = batch_size * output_size
+            decoder_input_dim = tf.stack([tf.shape(self.decoder_inputs)[1], self.input_output_size])
+            prev = tf.fill(decoder_input_dim, 0.0) 
             print("size of first decoder inputs: ", prev.shape)
-            decoder_loss, decoder_mode_loss = [], []
+            decoder_loss, decoder_mode_loss, decoder_predict_modes = [], [], []
             print("starting end2end decoding ... ")
             for i, inp in enumerate(embedded_decoder_inputs[:-1]):  # 输出端的每个输入词，第一个是GO
                 if not self.is_train and loop_function is not None and prev is not None:  # 测试的时候才用
@@ -268,32 +281,34 @@ class CompQAModel(object):
                     with tf.variable_scope("loop_function", reuse=True):
                         inp = loop_function(prev)
                 if(self.is_train):
+                    if(i == 0): print("inp shape:", inp.shape)
                     inp = loop_function(prev)
+                    if(i == 0): print("after loop function:", inp.shape)
 
                 # important!
-                if i > 0:
-                    tf.get_variable_scope().reuse_variables()
+                # What if I comment this?
+#                if i > 0:
+#                    tf.get_variable_scope().reuse_variables()
 
                 # output, state = cell_out(inp, state)
-                if(i == 1): print("source state shape: ", source_state.shape)
+                if(i == 0): print("source state shape: ", source_state.shape)
                 source_state = tf.reshape(source_state, [-1, self.max_src_len])
-                if(i == 1): print("after reshape: ", source_state.shape)
-                if(i == 1): print("kb state shape: ", kb_state.shape)
+                if(i == 0): print("after reshape: ", source_state.shape)
+                if(i == 0): print("kb state shape: ", kb_state.shape)
                 kb_state = tf.reshape(kb_state, [-1, self.max_fact_num])
-                if(i == 1): print("after reshape: ", kb_state.shape)
-                if(i == 1): print("inp shape:", inp.shape)
-                if(i == 1): print("state shape: ", state[0].shape)
+                if(i == 0): print("after reshape: ", kb_state.shape)
+                if(i == 0): print("state shape: ", state[0].shape)
                 concated_inp = tf.concat([inp, source_state, kb_state, avg_embedded_facts], 1)
-                if(i == 1): print("concated input shape: ", concated_inp.shape)
+                if(i == 0): print("concated input shape: ", concated_inp.shape)
                 output, state = cell_out(concated_inp, state)
-                if(i == 1): print("output shape: ", output.shape)
+                if(i == 0): print("output shape: ", output.shape)
                 if loop_function is not None:
                     prev = output
                 outputs.append(output)
 
                 #真实的模识
                 modes, weights = modes_seq[i], decoder_weights[i]
-                if(i == 1): print("shape of modes: ", modes.shape)
+                if(i == 0): print("shape of modes: ", modes.shape)
                 common_mode, source_mode, kb_mode = tf.unstack(tf.transpose(modes))
                 common_mode = tf.cast(common_mode, tf.float32)
                 source_mode = tf.cast(source_mode, tf.float32)
@@ -302,24 +317,25 @@ class CompQAModel(object):
                 #预测的模识
                 # pred_modes = mode_comp(state) #[batch, 3]
                 pred_modes = mode_comp(tf.concat([inp, state[0], state[1]], 1))  # [batch, 3]
+                decoder_predict_modes.append(pred_modes)
                 # pred_modes = mode_comp(inp)  # [batch, 3]
 
                 # pred_mode_crossent = tf.nn.softmax_cross_entropy_with_logits(pred_modes, tf.cast(modes, tf.float32))
                 # pred_mode_crossent = tf.nn.sigmoid_cross_entropy_with_logits(pred_modes, tf.cast(modes, tf.float32))
                 pred_mode_crossent = -1 * tf.log(pred_modes) * tf.cast(modes, tf.float32) #直接计算交叉熵
                 pred_mode_crossent = tf.reduce_sum(pred_mode_crossent, 1)
-                if(i == 1): print("shape of pred_mode_crossent", pred_mode_crossent.shape)
-                if(i == 1): print("shape of weights", weights.shape)
+                if(i == 0): print("shape of pred_mode_crossent", pred_mode_crossent.shape)
+                if(i == 0): print("shape of weights", weights.shape)
                 decoder_mode_loss.append(pred_mode_crossent * weights)
 
-                if(i == 1): print("shape of pred_modes: ", pred_modes.shape)
+                if(i == 0): print("shape of pred_modes: ", pred_modes.shape)
                 pred_common_mode, pred_source_mode, pred_kb_mode = tf.unstack(tf.transpose(pred_modes))
 
                 # 训练的时候
                 # 真实结果
                 common_truths = tf.one_hot(decoder_truths[i], self.vocab_size)
                 common_truths = tf.cast(common_truths, tf.float32)
-                if(i == 1): print("common_truth shape: ", common_truths.shape)
+                if(i == 0): print("common_truth shape: ", common_truths.shape)
                 sources_locs = tf.cast(sous_locs_seq[i], tf.float32)
                 kbkb_locs = tf.cast(kbkb_locs_seq[i], tf.float32)
 
@@ -337,7 +353,7 @@ class CompQAModel(object):
                 common_logit = tf.matmul(output, W1) + B1  # 通用的预测 [batch, vocab_size]
 
                 verbose = False
-                if(i == 1): verbose = True
+                if(i == 0): verbose = True
                 source_logit = source_atten_comp(tf.concat([state[0], state[1], hist_source_logit], 1), verbose)  # [batch, seq]
                 hist_source_logit += source_logit
                 # hist_source_logit = source_logit
@@ -373,6 +389,8 @@ class CompQAModel(object):
 
             self.decoder_outputs = outputs
             self.predict_truths = tf.stack(decoder_predicts)
+            self.predict_modes = tf.one_hot(tf.argmax(tf.stack(decoder_predict_modes), axis = 2), 3)
+            print("size of predict modes: ", self.predict_modes.shape)
         #####################################################################
 
         self.loss = self.base_loss + 0.01 * self.norm_loss# + 0.01 * tf.nn.l2_loss(self.embeddings)
@@ -472,11 +490,112 @@ class CompQAModel(object):
             loss, _ = session.run([self.loss, self.update], feed)
             return None, loss
         else:
-            predict_truths, loss = session.run([self.predict_truths, self.loss], feed)
+            predict_modes, predict_truths, loss = session.run([self.predict_modes, self.predict_truths, self.loss], feed)
             # predict_truths = np.transpose(predict_truths)
             # print '\n'.join(utils.ids_to_sentence(predict_truths.tolist(),
             #                                       dataloader.vocab_list, data_utils.EOS_ID, ''))
-            return predict_truths, loss
+            return predict_modes, predict_truths, loss
+
+    def mode_measure(self, pred, gold, qlens, batch_size):
+      #print("---- Measure predicated mode:")
+      #print("batch size = %d" % batch_size)
+      #print("qlens: ")
+      ## qlen size: [batchsize]
+      #print(qlens)
+      # pred size: [timestep, batch size, 3] -> [batch size, timestep, 3]
+      pred = np.transpose(pred, [1, 0, 2]).astype(int)
+      # gold size: [timestep, 3, batch size] -> [batch size, timestep, 3]
+      gold = np.transpose(gold, [2, 0, 1])
+      #print("pred: ")
+      #print(pred)
+      #print("gold: ")
+      #print(gold)
+      # common
+      ctp = 0
+      cfn = 0
+      cfp = 0
+      ctn = 0
+      # question
+      qtp = 0
+      qfn = 0
+      qfp = 0
+      qtn = 0
+      # kb
+      ktp = 0
+      kfn = 0
+      kfp = 0
+      ktn = 0
+      for i in range(batch_size)t
+        for j in range(int(qlens[i])):
+          # common
+          if(gold[i][j][0] == 1):
+            if(pred[i][j][0] == 1): ctp += 1
+            else: cfn += 1
+          else:
+            if(pred[i][j][0] == 1): cfp += 1
+            else: ctn += 1
+          # question
+          if(gold[i][j][1] == 1):
+            if(pred[i][j][1] == 1): qtp += 1
+            else: qfn += 1
+          else:
+            if(pred[i][j][1] == 1): qfp += 1
+            else: qtn += 1
+          # kb
+          if(gold[i][j][2] == 1):
+            if(pred[i][j][2] == 1): ktp += 1
+            else: kfn += 1
+          else:
+            if(pred[i][j][2] == 1): kfp += 1
+            else: ktn += 1
+      def precfunc(tp, fp):
+        if(tp + fp == 0): return 0
+        else: return float(tp) / float(tp + fp)
+      def reclfunc(tp, fn):
+        if(tp + fn == 0): return 0
+        else: return float(tp) / float(tp + fn)
+      def f1msfunc(prec, recl):
+        if(prec + recl == 0): return 0
+        else: return 2 * prec * recl / (prec + recl)
+      print("---- measurement for mode")
+      # common
+      c_prec = precfunc(ctp, cfp) 
+      c_recl = reclfunc(ctp, cfn)
+      c_f1ms = f1msfunc(c_prec, c_recl)
+      c_accu = float(ctp + ctn) / float(ctp + ctn + cfp + cfn)
+      print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+          (c_prec, c_recl, c_f1ms, c_accu))
+      # question
+      q_prec = precfunc(qtp, qfp) 
+      q_recl = reclfunc(qtp, qfn)
+      q_f1ms = f1msfunc(q_prec, q_recl)
+      q_accu = float(qtp + qtn) / float(qtp + qtn + qfp + qfn)
+      print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+          (q_prec, q_recl, q_f1ms, q_accu))
+      # kb
+      k_prec = precfunc(ktp, kfp) 
+      k_recl = reclfunc(ktp, kfn)
+      k_f1ms = f1msfunc(k_prec, k_recl)
+      k_accu = float(ktp + ktn) / float(ktp + ktn + kfp + kfn)
+      print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+          (k_prec, k_recl, k_f1ms, k_accu))
+      ret = dict()
+      ret["c_prec"] = c_prec
+      ret["c_recl"] = c_recl
+      ret["c_f1ms"] = c_f1ms
+      ret["c_accu"] = c_accu
+      ret["q_prec"] = q_prec
+      ret["q_recl"] = q_recl
+      ret["q_f1ms"] = q_f1ms
+      ret["q_accu"] = q_accu
+      ret["k_prec"] = k_prec
+      ret["k_recl"] = k_recl
+      ret["k_f1ms"] = k_f1ms
+      ret["k_accu"] = k_accu
+      return ret
+
+    def answer_accuracy(self, pred, gold, qlens, batch_size):
+      return
 
     def fit(self, dataloader, batch_size, epoch_size, step_per_checkpoint, model_dir):
         print("start training ... ")
@@ -497,18 +616,21 @@ class CompQAModel(object):
                     _, step_loss = self.step(ques, ques_lens, facts, resp, 
                         source, kbkb, modes, weights, True, session)
                     loss_sum += step_loss
-                    los_run += step_loss
+                    loss_run += step_loss
                     run_id += 1
                     if run_id % 100 == 0:
                         print "run %d loss %.5f time %.2f" % (run_id, loss_run, time.time() - start)
                         start = time.time()
                         loss_run = 0
                         # self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step = self.global_step)
-                        for _ques, _ques_lens, _facts, _resp, _source, _kbkb, _modes, _weights, _, _ in \
-                                dataloader.get_valid_batchs(20):
-                            predict_truths, step_loss = self.step(_ques, _ques_lens, _facts,
+                        for _ques, _ques_lens, _facts, _resp, _source, \
+                          _kbkb, _modes, _weights, _, _ in \
+                          dataloader.get_valid_batchs(20):
+                            predict_modes, predict_truths, step_loss = self.step(_ques, _ques_lens, _facts,
                                                                   _resp, _source, _kbkb, _modes, _weights,
                                                                   False, session, dataloader)
+                            self.mode_measure(predict_modes, _modes, _ques_lens, 20)
+                            # self.answer_measure(predict_truths, _resp, _ques_lens, 20)
                             print "validation-loss %.5f" % step_loss
                             validation_loss_sum += step_loss
                             break

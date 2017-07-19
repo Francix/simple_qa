@@ -57,14 +57,8 @@ def main():
                                cell_type = args.cell,
                                optimizer_name = args.optimizer, 
                                learning_rate = args.learning_rate)
-#    model = models.CompQAModel(dataloader.vocab_size, args.embedding_size,
-#                               dataloader.max_q_len, dataloader.max_a_len,
-#                               dataloader.max_fact_num,
-#                               args.state_size, args.num_layers, args.num_samples,
-#                               args.max_gradient_norm, True, args.cell,
-#                               args.optimizer, args.learning_rate)
     print "begining to train model .. "
-    # model.fit(dataloader, args.batch_size, args.epoch_size, args.checkpoint_step, args.model_path)
+    model.fit(dataloader, args.batch_size, args.epoch_size, args.checkpoint_step, args.model_path)
 
 
 def test():
@@ -93,7 +87,7 @@ def test():
     pass
 
 if __name__ == '__main__':
-    # main()
-    test()
+    main()
+    #test()
 
     pass
