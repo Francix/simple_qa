@@ -25,7 +25,7 @@ class CompQAModel(object):
     def __init__(self, vocab_size = 44, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
                  state_size=500, num_layers=1, num_samples=64,
                  max_grad_norm=5.0, is_train=True, cell_type='LSTM',
-                 optimizer_name='Adam', learning_rate=0.001):
+                 optimizer_name='Adam', learning_rate=1.0):
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
         self.max_src_len = max_src_len
@@ -68,6 +68,7 @@ class CompQAModel(object):
         self.decoder_modes = tf.placeholder(tf.int32, [self.max_des_len + 2, 3, None], 'decoder_modes')
 
         self.decoder_weights = tf.placeholder(tf.float32, [self.max_des_len + 2, None], 'decoder_weights')
+        self.keep_prob = tf.placeholder(tf.float32, shape = ())
 
         ###################对问句进行处理##########################
         # -- TB test 
@@ -300,6 +301,7 @@ class CompQAModel(object):
                 if(i == 0): print("state shape: ", state[0].shape)
                 concated_inp = tf.concat([inp, source_state, kb_state, avg_embedded_facts], 1)
                 if(i == 0): print("concated input shape: ", concated_inp.shape)
+                cell_out = tf.contrib.rnn.DropoutWrapper(cell_out, output_keep_prob = self.keep_prob)
                 output, state = cell_out(concated_inp, state)
                 if(i == 0): print("output shape: ", output.shape)
                 if loop_function is not None:
@@ -384,6 +386,8 @@ class CompQAModel(object):
                 source_state = source_logit
                 kb_state = kbkb_logit
 
+            self.decoder_loss = tf.reduce_mean(decoder_loss)
+            self.mode_loss = tf.reduce_mean(decoder_mode_loss)
             self.base_loss += tf.reduce_mean(decoder_loss)
             self.base_loss += 2.0 * tf.reduce_mean(decoder_mode_loss)
 
@@ -485,10 +489,12 @@ class CompQAModel(object):
         feed[self.decoder_kbkbs] = kbkb
         feed[self.decoder_modes] = modes
         feed[self.decoder_weights] = weights
+        if is_train: feed[self.keep_prob] = 0.8
+        else: feed[self.keep_prob] = 1.0
 
         if is_train:
-            loss, _ = session.run([self.loss, self.update], feed)
-            return None, loss
+            predict_modes, predict_truths, loss, _, decoder_loss, mode_loss = session.run([self.predict_modes, self.predict_truths, self.loss, self.update, self.decoder_loss, self.mode_loss], feed)
+            return predict_modes, predict_truths, loss, decoder_loss, mode_loss
         else:
             predict_modes, predict_truths, loss = session.run([self.predict_modes, self.predict_truths, self.loss], feed)
             # predict_truths = np.transpose(predict_truths)
@@ -525,7 +531,8 @@ class CompQAModel(object):
       kfn = 0
       kfp = 0
       ktn = 0
-      for i in range(batch_size)t
+      batch_size = gold.shape[0]
+      for i in range(batch_size):
         for j in range(int(qlens[i])):
           # common
           if(gold[i][j][0] == 1):
@@ -557,28 +564,28 @@ class CompQAModel(object):
       def f1msfunc(prec, recl):
         if(prec + recl == 0): return 0
         else: return 2 * prec * recl / (prec + recl)
-      print("---- measurement for mode")
+      # print("-- measurement for validation mode")
       # common
       c_prec = precfunc(ctp, cfp) 
       c_recl = reclfunc(ctp, cfn)
       c_f1ms = f1msfunc(c_prec, c_recl)
       c_accu = float(ctp + ctn) / float(ctp + ctn + cfp + cfn)
-      print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-          (c_prec, c_recl, c_f1ms, c_accu))
+      # print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+      #     (c_prec, c_recl, c_f1ms, c_accu))
       # question
       q_prec = precfunc(qtp, qfp) 
       q_recl = reclfunc(qtp, qfn)
       q_f1ms = f1msfunc(q_prec, q_recl)
       q_accu = float(qtp + qtn) / float(qtp + qtn + qfp + qfn)
-      print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-          (q_prec, q_recl, q_f1ms, q_accu))
+      # print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+      #     (q_prec, q_recl, q_f1ms, q_accu))
       # kb
       k_prec = precfunc(ktp, kfp) 
       k_recl = reclfunc(ktp, kfn)
       k_f1ms = f1msfunc(k_prec, k_recl)
       k_accu = float(ktp + ktn) / float(ktp + ktn + kfp + kfn)
-      print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-          (k_prec, k_recl, k_f1ms, k_accu))
+      # print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+      #     (k_prec, k_recl, k_f1ms, k_accu))
       ret = dict()
       ret["c_prec"] = c_prec
       ret["c_recl"] = c_recl
@@ -610,18 +617,48 @@ class CompQAModel(object):
                 loss_sum = 0
                 validation_loss_sum = 0
                 run_id, loss_run = 0, 0
+                decoder_loss_run = 0
+                mode_loss_run = 0
                 start = time.time()
+                train_measure = dict()
+                train_measure["c_prec"] = 0
+                train_measure["c_recl"] = 0
+                train_measure["c_f1ms"] = 0
+                train_measure["c_accu"] = 0
+                train_measure["q_prec"] = 0
+                train_measure["q_recl"] = 0
+                train_measure["q_f1ms"] = 0
+                train_measure["q_accu"] = 0
+                train_measure["k_prec"] = 0
+                train_measure["k_recl"] = 0
+                train_measure["k_f1ms"] = 0
+                train_measure["k_accu"] = 0
                 for ques, ques_lens, facts, resp, source, kbkb, modes, weights, _, _ in \
                         dataloader.get_train_batchs(batch_size):
-                    _, step_loss = self.step(ques, ques_lens, facts, resp, 
+                    predict_modes, predict_truths, step_loss, decoder_loss, mode_loss = self.step(ques, ques_lens, facts, resp, 
                         source, kbkb, modes, weights, True, session)
                     loss_sum += step_loss
                     loss_run += step_loss
+                    decoder_loss_run += decoder_loss
+                    mode_loss_run += mode_loss
                     run_id += 1
+                    step_measure = self.mode_measure(predict_modes, modes, ques_lens, batch_size)
+                    for mr_ in train_measure: train_measure[mr_] += step_measure[mr_]
                     if run_id % 100 == 0:
-                        print "run %d loss %.5f time %.2f" % (run_id, loss_run, time.time() - start)
+                        print "---- run %d loss %.5f decoder %.5f mode %.5f time %.2f" % (run_id, loss_run, decoder_loss_run, mode_loss_run, time.time() - start)
+                        print("-- measurement for train mode")
+                        for mr_ in train_measure: train_measure[mr_] /= 100
+                        print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+                            (train_measure["c_prec"], train_measure["c_recl"], train_measure["c_f1ms"], train_measure["c_accu"]))
+                        print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+                            (train_measure["q_prec"], train_measure["q_recl"], train_measure["q_f1ms"], train_measure["q_accu"]))
+                        print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+                            (train_measure["k_prec"], train_measure["k_recl"], train_measure["k_f1ms"], train_measure["k_accu"]))
+                        for mr_ in train_measure: train_measure[mr_] = 0.0
                         start = time.time()
                         loss_run = 0
+                        decoder_loss_run = 0 
+                        mode_loss_run = 0 
                         # self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step = self.global_step)
                         for _ques, _ques_lens, _facts, _resp, _source, \
                           _kbkb, _modes, _weights, _, _ in \
@@ -629,7 +666,15 @@ class CompQAModel(object):
                             predict_modes, predict_truths, step_loss = self.step(_ques, _ques_lens, _facts,
                                                                   _resp, _source, _kbkb, _modes, _weights,
                                                                   False, session, dataloader)
-                            self.mode_measure(predict_modes, _modes, _ques_lens, 20)
+                            validation_measure = self.mode_measure(predict_modes, _modes, _ques_lens, 20)
+                            print("-- measurement for validation mode")
+                            for mr_ in train_measure: train_measure[mr_] /= 100
+                            print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+                                (validation_measure["c_prec"], validation_measure["c_recl"], validation_measure["c_f1ms"], validation_measure["c_accu"]))
+                            print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+                                (validation_measure["q_prec"], validation_measure["q_recl"], validation_measure["q_f1ms"], validation_measure["q_accu"]))
+                            print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
+                                (validation_measure["k_prec"], validation_measure["k_recl"], validation_measure["k_f1ms"], validation_measure["k_accu"]))
                             # self.answer_measure(predict_truths, _resp, _ques_lens, 20)
                             print "validation-loss %.5f" % step_loss
                             validation_loss_sum += step_loss
