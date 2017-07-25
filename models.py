@@ -4,6 +4,7 @@ import sys
 reload(sys)
 sys.setdefaultencoding('utf-8')
 
+from termcolor import colored
 import tensorflow as tf
 from tensorflow.python.ops import rnn, rnn_cell
 from tensorflow.python.framework import dtypes
@@ -13,19 +14,11 @@ import os
 import utils
 import data_utils
 
-class ModeMeasure(object):
-  def __init__(self):
-    return
-  def accumulate(self, mm):
-    return
-  def show(self):
-    return
-
 class CompQAModel(object):
-    def __init__(self, vocab_size = 44, embedding_size = 256, max_src_len = 7, max_des_len = 11, max_fact_num = 4,
-                 state_size=500, num_layers=1, num_samples=64,
-                 max_grad_norm=5.0, is_train=True, cell_type='LSTM',
-                 optimizer_name='Adam', learning_rate=1.0):
+    def __init__(self, vocab_size, embedding_size, max_src_len, max_des_len,
+                 max_fact_num, state_size, num_layers, num_samples,
+                 max_grad_norm, is_train, cell_type,
+                 optimizer_name, learning_rate):
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
         self.max_src_len = max_src_len
@@ -38,8 +31,10 @@ class CompQAModel(object):
         self.cell_type = cell_type
         self.optimizer_name = optimizer_name
         self.learning_rate = learning_rate
+        self.load_prev_train = False
         self.is_train = is_train
         self.global_step = tf.Variable(0, trainable=False)
+        self.mode_loss_ratio = 10.0 # 1.0, 2.0, 5.0, 10.0
 
         self._define_embedding()
         self._define_graph()
@@ -62,10 +57,13 @@ class CompQAModel(object):
 
         self.decoder_inputs = tf.placeholder(tf.int32, [self.max_des_len + 2, None], 'decoder_inputs')
         # what is this? -- if copy from source sentence, decide which position
-        self.decoder_sources = tf.placeholder(tf.int32, [self.max_des_len + 2, self.max_src_len, None], 'decoder_sources')
+        self.decoder_sources = tf.placeholder(tf.int32,
+            [self.max_des_len + 2, self.max_src_len, None], 'decoder_sources')
         # what is this? -- if copy from kb, decide which position
-        self.decoder_kbkbs = tf.placeholder(tf.int32, [self.max_des_len + 2, self.max_fact_num, None], 'decoder_kbkbs')
-        self.decoder_modes = tf.placeholder(tf.int32, [self.max_des_len + 2, 3, None], 'decoder_modes')
+        self.decoder_kbkbs = tf.placeholder(tf.int32,
+            [self.max_des_len + 2, self.max_fact_num, None], 'decoder_kbkbs')
+        self.decoder_modes = tf.placeholder(tf.int32,
+            [self.max_des_len + 2, 3, None], 'decoder_modes')
 
         self.decoder_weights = tf.placeholder(tf.float32, [self.max_des_len + 2, None], 'decoder_weights')
         self.keep_prob = tf.placeholder(tf.float32, shape = ())
@@ -89,15 +87,17 @@ class CompQAModel(object):
         else:
             cell_fw = tf.nn.rnn_cell.BasicRNNCell(self.state_size)
             cell_bw = tf.nn.rnn_cell.BasicRNNCell(self.state_size)
-        (output_fw, output_bw), ((output_state_fw_c, output_state_fw_h), (output_state_bw_c, output_state_bw_h)) = tf.nn.bidirectional_dynamic_rnn(
-            cell_fw, cell_bw, embedded_encoder_inputs, sequence_length=self.encoder_lengths, dtype=dtypes.float32, time_major = True)
+        (output_fw, output_bw), ((output_state_fw_c, output_state_fw_h), (output_state_bw_c, output_state_bw_h)) =\
+            tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, embedded_encoder_inputs,
+                sequence_length=self.encoder_lengths, dtype=dtypes.float32, time_major = True)
         print("output size: ", output_fw.shape, output_fw.shape)
         self.encoder_outputs = tf.concat([output_fw, output_bw], 2)
         print("after concat: ", self.encoder_outputs.shape)
         self.encoder_outputs = tf.unstack(self.encoder_outputs)
         print("after unstack, length = ", len(self.encoder_outputs), "shape: ", self.encoder_outputs[0].shape)
         print("state size: ", output_state_fw_c.shape)
-        self.encoder_states = tf.concat([output_state_fw_c, output_state_fw_h, output_state_bw_c, output_state_bw_h], 1)
+        self.encoder_states = tf.concat([output_state_fw_c, output_state_fw_h,
+          output_state_bw_c, output_state_bw_h], 1)
         print("states after concat: ", self.encoder_states.shape)
         print("question processing finished .... ")
         #####################################################################
@@ -153,20 +153,27 @@ class CompQAModel(object):
 
         # 输入(prev, loc1, loc2)表示上一步预测的词ID和从源句子和KB中copy的位置
         # obsolete
-#        def loop_function(prev, _):
-#            prev = tf.matmul(prev, output_projection[0]) + output_projection[1]
-#            prev_symbol = tf.argmax(prev, 1) #[batch_size]
-#            emb_prev = tf.nn.embedding_lookup(self.embeddings, prev_symbol) #[batch_size, embedding_size]
-#            return emb_prev
 
         # two types of new loop functions
         def loop_same(prev):
             return prev
 
-        def loop_projection(prev, mode):
+        def loop_projection(prev, mode_logit):
+            # prev shape: [batch size, state size]
+            # mode shape: [batch size, 3]
+            prev = tf.matmul(prev, output_projection[0]) + output_projection[1]
+            prev_symbol = tf.argmax(prev, 1)
+            embedded_prev = tf.nn.embedding_lookup(self.embeddings, prev_symbol)
+            pad_embeddings = embedded_decoder_inputs[-1]
+            mode = tf.cast(tf.one_hot(tf.argmax(mode_logit, axis = 1), 3), tf.float32)
+            # is_common shape: [batch size]
+            is_common = tf.unstack(tf.transpose(mode))[0]
+            prev = embedded_prev * tf.expand_dims(is_common, 1) + pad_embeddings * tf.expand_dims(
+                tf.ones(tf.shape(is_common), tf.float32) - is_common, 1)
             return prev
 
-        loop_function = loop_same
+        # loop_function = loop_same
+        loop_function = loop_projection
 
         #对源句子进行attention
         source_atten_state_size = self.output_state_size + self.input_output_size + self.max_src_len
@@ -223,7 +230,7 @@ class CompQAModel(object):
             return _inputs
 
         #对使用mode进行预测
-        mode_comp_state_size = self.output_state_size + self.input_output_size
+        mode_comp_state_size = self.output_state_size + self.embedding_size
         # mode_comp_state_size = self.embedding_size
         mode_mlp_w1 = tf.Variable(tf.truncated_normal([mode_comp_state_size, 200], stddev=0.1),
                                   name="MODE_MLP_W1")
@@ -269,27 +276,33 @@ class CompQAModel(object):
             decoder_predicts = []
             outputs = []
             # look up embeddings for _GO
-            # prev = tf.nn.embedding_lookup(self.embeddings, tf.unstack(self.decoder_inputs)[0])
+            prev = tf.nn.embedding_lookup(self.embeddings, tf.unstack(self.decoder_inputs)[0])
             # size = batch_size * output_size
-            decoder_input_dim = tf.stack([tf.shape(self.decoder_inputs)[1], self.input_output_size])
-            prev = tf.fill(decoder_input_dim, 0.0) 
+            #decoder_input_dim = tf.stack([tf.shape(self.decoder_inputs)[1], self.input_output_size])
+            #prev = tf.fill(decoder_input_dim, 0.0) 
             print("size of first decoder inputs: ", prev.shape)
             decoder_loss, decoder_mode_loss, decoder_predict_modes = [], [], []
             print("starting end2end decoding ... ")
-            for i, inp in enumerate(embedded_decoder_inputs[:-1]):  # 输出端的每个输入词，第一个是GO
-                if not self.is_train and loop_function is not None and prev is not None:  # 测试的时候才用
+            for i, inp in enumerate(embedded_decoder_inputs[:-1]):  # 输出端的每个输入词，第一个是GOprojection
+                # if not self.is_train and loop_function is not None and prev is not None and i >= 1:  # 测试的时候才用
+                if not self.is_train and i >= 1:  # 测试的时候才用
                     # question: why I should use this "with" statement?
                     with tf.variable_scope("loop_function", reuse=True):
-                        inp = loop_function(prev)
+                        inp = loop_function(prev, pred_modes)
+                        # inp = prev
                 if(self.is_train):
                     if(i == 0): print("inp shape:", inp.shape)
-                    inp = loop_function(prev)
-                    if(i == 0): print("after loop function:", inp.shape)
+                    if(i != 0):
+                        inp = loop_function(prev, pred_modes)
+                        if(i == 1): print("after loop function:", inp.shape)
+                # test here
+                # if(i != 0):
+                #     inp = loop_function(prev, pred_modes)
 
                 # important!
                 # What if I comment this?
-#                if i > 0:
-#                    tf.get_variable_scope().reuse_variables()
+                if i > 0:
+                    tf.get_variable_scope().reuse_variables()
 
                 # output, state = cell_out(inp, state)
                 if(i == 0): print("source state shape: ", source_state.shape)
@@ -389,7 +402,7 @@ class CompQAModel(object):
             self.decoder_loss = tf.reduce_mean(decoder_loss)
             self.mode_loss = tf.reduce_mean(decoder_mode_loss)
             self.base_loss += tf.reduce_mean(decoder_loss)
-            self.base_loss += 2.0 * tf.reduce_mean(decoder_mode_loss)
+            self.base_loss += self.mode_loss_ratio * tf.reduce_mean(decoder_mode_loss)
 
             self.decoder_outputs = outputs
             self.predict_truths = tf.stack(decoder_predicts)
@@ -412,17 +425,24 @@ class CompQAModel(object):
             optimizer = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)
         self.update = optimizer.apply_gradients(zip(clipped_gradients, params), global_step=self.global_step)
 
-        with tf.device("/cpu:0"):
-            self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=10)
+       #  with tf.device("/cpu:0"):
+            # self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=10)
+            # self.saver = tf.train.Saver()
 
     def initilize(self, model_dir, session=None):
         ckpt = tf.train.get_checkpoint_state(model_dir)
-        if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
-            print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-            self.saver.restore(session, ckpt.model_checkpoint_path)
-        else:
+        self.saver = tf.train.Saver()
+        if(self.is_train and (not self.load_prev_train)):
             print("Creating model with fresh parameters.")
             session.run(tf.global_variables_initializer())
+            # test
+            # print("saving model ... ")
+            # self.saver.save(session, "model.ckpt")
+            return
+        else:
+            print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+            print("test restoring model ... ")
+            self.saver.restore(session, ckpt.model_checkpoint_path)
 
     def test(self, dataloader, model_dir):
         config = tf.ConfigProto(allow_soft_placement=True)
@@ -442,6 +462,7 @@ class CompQAModel(object):
                 feed[self.decoder_modes] = modes
                 feed[self.decoder_modes] = np.ones(np.shape(modes), dtype=int)#全部一样
                 feed[self.decoder_weights] = weights
+                feed[self.keep_prob] = 1.0
                 decoder_predicts = session.run([self.predict_truths], feed)
                 decoder_predicts = decoder_predicts[0]
 
@@ -483,7 +504,6 @@ class CompQAModel(object):
         feed[self.encoder_inputs] = ques
         feed[self.encoder_lengths] = ques_lens
         feed[self.facts_inputs] = facts
-
         feed[self.decoder_inputs] = resp
         feed[self.decoder_sources] = source
         feed[self.decoder_kbkbs] = kbkb
@@ -493,65 +513,101 @@ class CompQAModel(object):
         else: feed[self.keep_prob] = 1.0
 
         if is_train:
-            predict_modes, predict_truths, loss, _, decoder_loss, mode_loss = session.run([self.predict_modes, self.predict_truths, self.loss, self.update, self.decoder_loss, self.mode_loss], feed)
+            predict_modes, predict_truths, loss, _, decoder_loss, mode_loss = session.run(
+                [self.predict_modes, self.predict_truths, self.loss, self.update, self.decoder_loss, self.mode_loss],
+                feed)
             return predict_modes, predict_truths, loss, decoder_loss, mode_loss
         else:
-            predict_modes, predict_truths, loss = session.run([self.predict_modes, self.predict_truths, self.loss], feed)
+            predict_modes, predict_truths, loss = session.run([self.predict_modes, self.predict_truths, self.loss],
+                feed)
             # predict_truths = np.transpose(predict_truths)
             # print '\n'.join(utils.ids_to_sentence(predict_truths.tolist(),
             #                                       dataloader.vocab_list, data_utils.EOS_ID, ''))
             return predict_modes, predict_truths, loss
 
-    def mode_measure(self, pred, gold, qlens, batch_size):
-      #print("---- Measure predicated mode:")
-      #print("batch size = %d" % batch_size)
-      #print("qlens: ")
-      ## qlen size: [batchsize]
-      #print(qlens)
-      # pred size: [timestep, batch size, 3] -> [batch size, timestep, 3]
+    def get_answer_lens(self, ans):
+      ans = np.transpose(ans)
+      # print(ans)
+      anslens = []
+      for ian in ans:
+        endpos = [i for i, w in enumerate(ian) if w == 1]
+        anslens.append(endpos[0])
+      return anslens
+
+    def mode_measure(self, pred, gold, anslens, batch_size, verbose = False):
       pred = np.transpose(pred, [1, 0, 2]).astype(int)
-      # gold size: [timestep, 3, batch size] -> [batch size, timestep, 3]
       gold = np.transpose(gold, [2, 0, 1])
-      #print("pred: ")
-      #print(pred)
-      #print("gold: ")
-      #print(gold)
+      if(verbose):
+        # print("---- Measure predicated mode:")
+        # print("batch size = %d" % batch_size)
+        # print("anslens: ")
+        # qlen size: [batchsize]
+        # print(anslens)
+        # pred size: [timestep, batch size, 3] -> [batch size, timestep, 3]
+        # print("pred shape", pred.shape)
+        # gold size: [timestep, 3, batch size] -> [batch size, timestep, 3]
+        # print("gold shape", gold.shape)
+        # print("pred: ")
+        # print(pred)
+        # print("gold: ")
+        # print(gold)
+        pass
       # common
       ctp = 0
       cfn = 0
       cfp = 0
       ctn = 0
+      ctotal = 0
       # question
       qtp = 0
       qfn = 0
       qfp = 0
       qtn = 0
+      qtotal = 0
       # kb
       ktp = 0
       kfn = 0
       kfp = 0
       ktn = 0
+      ktotal = 0
+      confusion_matrix = np.zeros([3, 3], dtype = np.int)
       batch_size = gold.shape[0]
       for i in range(batch_size):
-        for j in range(int(qlens[i])):
+        for j in range(int(anslens[i])):
           # common
+          predicted = np.argmax(pred[i][j])
           if(gold[i][j][0] == 1):
-            if(pred[i][j][0] == 1): ctp += 1
-            else: cfn += 1
+            ctotal += 1
+            if(pred[i][j][0] == 1):
+              ctp += 1
+              confusion_matrix[0][0] += 1
+            else:
+              cfn += 1
+              confusion_matrix[0][predicted] += 1
           else:
             if(pred[i][j][0] == 1): cfp += 1
             else: ctn += 1
           # question
           if(gold[i][j][1] == 1):
-            if(pred[i][j][1] == 1): qtp += 1
-            else: qfn += 1
+            qtotal += 1
+            if(pred[i][j][1] == 1):
+              qtp += 1
+              confusion_matrix[1][1] += 1
+            else:
+              qfn += 1
+              confusion_matrix[1][predicted] += 1
           else:
             if(pred[i][j][1] == 1): qfp += 1
             else: qtn += 1
           # kb
           if(gold[i][j][2] == 1):
-            if(pred[i][j][2] == 1): ktp += 1
-            else: kfn += 1
+            ktotal += 1
+            if(pred[i][j][2] == 1):
+              ktp += 1
+              confusion_matrix[2][2] += 1
+            else:
+              kfn += 1
+              confusion_matrix[2][predicted] += 1
           else:
             if(pred[i][j][2] == 1): kfp += 1
             else: ktn += 1
@@ -566,21 +622,21 @@ class CompQAModel(object):
         else: return 2 * prec * recl / (prec + recl)
       # print("-- measurement for validation mode")
       # common
-      c_prec = precfunc(ctp, cfp) 
+      c_prec = precfunc(ctp, cfp)
       c_recl = reclfunc(ctp, cfn)
       c_f1ms = f1msfunc(c_prec, c_recl)
       c_accu = float(ctp + ctn) / float(ctp + ctn + cfp + cfn)
       # print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
       #     (c_prec, c_recl, c_f1ms, c_accu))
       # question
-      q_prec = precfunc(qtp, qfp) 
+      q_prec = precfunc(qtp, qfp)
       q_recl = reclfunc(qtp, qfn)
       q_f1ms = f1msfunc(q_prec, q_recl)
       q_accu = float(qtp + qtn) / float(qtp + qtn + qfp + qfn)
       # print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
       #     (q_prec, q_recl, q_f1ms, q_accu))
       # kb
-      k_prec = precfunc(ktp, kfp) 
+      k_prec = precfunc(ktp, kfp)
       k_recl = reclfunc(ktp, kfn)
       k_f1ms = f1msfunc(k_prec, k_recl)
       k_accu = float(ktp + ktn) / float(ktp + ktn + kfp + kfn)
@@ -599,14 +655,45 @@ class CompQAModel(object):
       ret["k_recl"] = k_recl
       ret["k_f1ms"] = k_f1ms
       ret["k_accu"] = k_accu
+      ret["c"] = np.array((ctp, ctn, cfp, cfn, ctotal))
+      ret["q"] = np.array((qtp, qtn, qfp, qfn, qtotal))
+      ret["k"] = np.array((ktp, ktn, kfp, kfn, ktotal))
+      ret["confusion_matrix"] = confusion_matrix
       return ret
 
-    def answer_accuracy(self, pred, gold, qlens, batch_size):
+    def answer_measure(self, pred, gold, anslens, batch_size, dataloader, verbose = False):
+      pred = np.transpose(pred)
+      gold = gold[1:]
+      gold = np.transpose(gold)
+      indices = pred >= self.vocab_size
+      pred[indices] = 0
+      correct_predicted = np.sum(pred == gold)
+      total_ans = pred.shape[0] * pred.shape[1]
+      def reduce_print(x):
+        if x == "_PAD": return colored("空", "green")
+        elif x == "_EOS": return colored("完", "yellow")
+        else: return x
+      if(verbose):
+        # print("pred / gold")
+        # print '\n'.join(utils.ids_to_sentence(total_ans.tolist(), dataloader.vocab_list))
+        for i in range(pred.shape[0]):
+          preds = " ".join([reduce_print(dataloader.vocab_list[j]) for j in pred[i]])
+          golds = " ".join([reduce_print(dataloader.vocab_list[j]) for j in gold[i]])
+          print("pred: %s" % preds)
+          print("gold: %s" % golds)
+        print("accuracy: %.4f" % (float(correct_predicted) / total_ans))
+        # print("predicted ")
+        # print(pred)
+        # print '\n'.join(utils.ids_to_sentence(pred.tolist(), dataloader.vocab_list))
+        # print("golden ")
+        # print(gold)
+        # print '\n'.join(utils.ids_to_sentence(gold.tolist(), dataloader.vocab_list))
+      # size = [maxlen, batch_size]
       return
 
     def fit(self, dataloader, batch_size, epoch_size, step_per_checkpoint, model_dir):
         print("start training ... ")
-        config = tf.ConfigProto(allow_soft_placement=True)
+        config = tf.ConfigProto(allow_soft_placement = True)
         config.gpu_options.allow_growth = True
         with tf.Session(config=config) as session:
             self.initilize(model_dir, session)
@@ -633,32 +720,50 @@ class CompQAModel(object):
                 train_measure["k_recl"] = 0
                 train_measure["k_f1ms"] = 0
                 train_measure["k_accu"] = 0
+                train_measure["c"] = np.zeros([5], dtype = np.int)
+                train_measure["q"] = np.zeros([5], dtype = np.int)
+                train_measure["k"] = np.zeros([5], dtype = np.int)
+                train_measure["confusion_matrix"] = np.zeros([3, 3], dtype = np.int)
                 for ques, ques_lens, facts, resp, source, kbkb, modes, weights, _, _ in \
                         dataloader.get_train_batchs(batch_size):
-                    predict_modes, predict_truths, step_loss, decoder_loss, mode_loss = self.step(ques, ques_lens, facts, resp, 
-                        source, kbkb, modes, weights, True, session)
+                    predict_modes, predict_truths, step_loss, decoder_loss, mode_loss = self.step(ques,
+                        ques_lens, facts, resp, source, kbkb, modes, weights, True, session)
                     loss_sum += step_loss
                     loss_run += step_loss
                     decoder_loss_run += decoder_loss
                     mode_loss_run += mode_loss
                     run_id += 1
-                    step_measure = self.mode_measure(predict_modes, modes, ques_lens, batch_size)
+                    anslens = self.get_answer_lens(resp)
+                    step_measure = self.mode_measure(predict_modes, modes, anslens, batch_size)
                     for mr_ in train_measure: train_measure[mr_] += step_measure[mr_]
                     if run_id % 100 == 0:
-                        print "---- run %d loss %.5f decoder %.5f mode %.5f time %.2f" % (run_id, loss_run, decoder_loss_run, mode_loss_run, time.time() - start)
+                        print "---- run %d loss %.5f decoder %.5f mode %.5f time %.2f" % (run_id, loss_run,
+                            decoder_loss_run, mode_loss_run, time.time() - start)
                         print("-- measurement for train mode")
                         for mr_ in train_measure: train_measure[mr_] /= 100
-                        print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-                            (train_measure["c_prec"], train_measure["c_recl"], train_measure["c_f1ms"], train_measure["c_accu"]))
-                        print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-                            (train_measure["q_prec"], train_measure["q_recl"], train_measure["q_f1ms"], train_measure["q_accu"]))
-                        print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-                            (train_measure["k_prec"], train_measure["k_recl"], train_measure["k_f1ms"], train_measure["k_accu"]))
-                        for mr_ in train_measure: train_measure[mr_] = 0.0
+                        print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
+                            (train_measure["c_prec"], train_measure["c_recl"],
+                              train_measure["c_f1ms"], train_measure["c_accu"]))
+                        print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
+                            (train_measure["q_prec"], train_measure["q_recl"],
+                              train_measure["q_f1ms"], train_measure["q_accu"]))
+                        print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
+                            (train_measure["k_prec"], train_measure["k_recl"],
+                              train_measure["k_f1ms"], train_measure["k_accu"]))
+                        total_case_num = train_measure["c"][4] + train_measure["q"][4] + train_measure["k"][4]
+                        print("c - tp/ tn/ fp/ fn/ total/ frag", train_measure["c"],
+                            float(train_measure["c"][4]) / total_case_num)
+                        print("q - tp/ tn/ fp/ fn/ total/ frag", train_measure["q"],
+                            float(train_measure["q"][4]) / total_case_num)
+                        print("k - tp/ tn/ fp/ fn/ total/ frag", train_measure["k"],
+                            float(train_measure["k"][4]) / total_case_num)
+                        print("confusion matrix:")
+                        print(train_measure["confusion_matrix"])
+                        for mr_ in train_measure: train_measure[mr_] *= 0
                         start = time.time()
                         loss_run = 0
-                        decoder_loss_run = 0 
-                        mode_loss_run = 0 
+                        decoder_loss_run = 0
+                        mode_loss_run = 0
                         # self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step = self.global_step)
                         for _ques, _ques_lens, _facts, _resp, _source, \
                           _kbkb, _modes, _weights, _, _ in \
@@ -666,21 +771,33 @@ class CompQAModel(object):
                             predict_modes, predict_truths, step_loss = self.step(_ques, _ques_lens, _facts,
                                                                   _resp, _source, _kbkb, _modes, _weights,
                                                                   False, session, dataloader)
-                            validation_measure = self.mode_measure(predict_modes, _modes, _ques_lens, 20)
+                            anslens = self.get_answer_lens(_resp)
+                            validation_measure = self.mode_measure(predict_modes, _modes, anslens, 20, True)
+                            # validation_answer_measure = self.answer_measure(predict_truths, _resp, _ques_lens, 20)
                             print("-- measurement for validation mode")
-                            for mr_ in train_measure: train_measure[mr_] /= 100
-                            print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-                                (validation_measure["c_prec"], validation_measure["c_recl"], validation_measure["c_f1ms"], validation_measure["c_accu"]))
-                            print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-                                (validation_measure["q_prec"], validation_measure["q_recl"], validation_measure["q_f1ms"], validation_measure["q_accu"]))
-                            print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" % 
-                                (validation_measure["k_prec"], validation_measure["k_recl"], validation_measure["k_f1ms"], validation_measure["k_accu"]))
-                            # self.answer_measure(predict_truths, _resp, _ques_lens, 20)
+                            print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
+                                (validation_measure["c_prec"], validation_measure["c_recl"],
+                                  validation_measure["c_f1ms"], validation_measure["c_accu"]))
+                            print("question:    prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
+                                (validation_measure["q_prec"], validation_measure["q_recl"],
+                                  validation_measure["q_f1ms"], validation_measure["q_accu"]))
+                            print("kb mode:     prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
+                                (validation_measure["k_prec"], validation_measure["k_recl"],
+                                  validation_measure["k_f1ms"], validation_measure["k_accu"]))
+                            print("c - tp/ tn/ fp/ fn/ total", validation_measure["c"])
+                            print("q - tp/ tn/ fp/ fn/ total", validation_measure["q"])
+                            print("k - tp/ tn/ fp/ fn/ total", validation_measure["k"])
+                            print("confusion matrix:")
+                            print(validation_measure["confusion_matrix"])
+                            self.answer_measure(predict_truths, _resp, _ques_lens, 20, dataloader, True)
                             print "validation-loss %.5f" % step_loss
+                            print("")
+                            # self.saver.save(session, model_dir + 'model.ckpt', global_step = run_id)
                             validation_loss_sum += step_loss
                             break
 #                if epoch % step_per_checkpoint == 0:
 #                    self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step=self.global_step)
-                self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step=epoch)
+                self.saver.save(session, model_dir + 'model.ckpt', global_step=epoch)
                 epoch_finish = time.time()
-                print "---- epoch %d loss %.5f, validation loss = %.5f, time %.2f" % (epoch, loss_sum, validation_loss_sum,epoch_finish - epoch_start)
+                print "\n---- epoch %d loss %.5f, validation loss = %.5f, time %.2f\n" % (epoch,
+                    loss_sum, validation_loss_sum,epoch_finish - epoch_start)

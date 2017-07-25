@@ -309,6 +309,26 @@ class DataLoader(object):
             #       decoder_inputs, decoder_sources, decoder_kbkbs, decoder_modes,
             #       decoder_weights, inst_ques_words, inst_real_facts
 
+
+def show_statistics(dataloader):
+  total_common_modes = 0
+  total_question_modes = 0
+  total_kb_modes = 0
+  for ques, ques_lens, facts, resp, source, kbkb, modes, weights, ques_words, real_facts in dataloader.get_train_batchs(50):
+    modes = np.transpose(modes, [1, 0, 2])
+    # print("modes shape", modes.shape)
+    # print(modes)
+    total_common_modes += np.sum(modes[0])
+    total_question_modes += np.sum(modes[1])
+    total_kb_modes += np.sum(modes[2])
+    # break
+  total_modes = total_common_modes + total_question_modes + total_kb_modes
+  print("total_common_modes:   %d, ratio: %.4f" % (total_common_modes, float(total_common_modes) / total_modes))
+  print("total_question_modes: %d, ratio: %.4f" % (total_question_modes, float(total_question_modes) / total_modes))
+  print("total_kb_modes:       %d, ratio: %.4f" % (total_kb_modes, float(total_kb_modes) / total_modes))
+
+
+
 if __name__ == '__main__':
     data_path = '../syndata/'
     min_frq = 0
@@ -360,6 +380,7 @@ if __name__ == '__main__':
         print weights
         print np.shape(weights)
         break
+    show_statistics(dataloader)
 
 
 
