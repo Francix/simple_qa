@@ -155,6 +155,7 @@ class CompQAModel(object):
             cell_out = rnn_cell.GRUCell(self.input_output_size)
         else:
             cell_out = tf.nn.rnn_cell.BasicRNNCell(self.input_output_size)
+        cell_out = tf.contrib.rnn.DropoutWrapper(cell_out, output_keep_prob = self.keep_prob)
 
         ###用于对输出状态预测目标词
         W1 = tf.get_variable("proj_w1", [self.output_output_size, self.vocab_size])
@@ -335,7 +336,7 @@ class CompQAModel(object):
                 if(i == 0): print("state shape: ", state[0].shape)
                 concated_inp = tf.concat([inp, source_state, kb_state, avg_embedded_facts], 1)
                 if(i == 0): print("concated input shape: ", concated_inp.shape)
-                cell_out = tf.contrib.rnn.DropoutWrapper(cell_out, output_keep_prob = self.keep_prob)
+                # cell_out = tf.contrib.rnn.DropoutWrapper(cell_out, output_keep_prob = self.keep_prob)
                 output, state = cell_out(concated_inp, state)
                 if(i == 0): print("output shape: ", output.shape)
                 if loop_function is not None:

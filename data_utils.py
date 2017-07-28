@@ -189,6 +189,7 @@ class DataLoader(object):
                         cand_fact_ids.append((PAD_ID, PAD_ID))
                         real_facts.append((PAD, PAD))
                     fact_objs = [x[1] for x in ent_facts]
+                    # print("fact_objs = ", fact_objs)
 
                     answ_ids, answ_modes = list(), list()
                     answ4ques_locs, answ4kbkb_locs = list(), list()
@@ -244,6 +245,7 @@ class DataLoader(object):
         # print 'batch size is : ', batch_size
         if data is None:
             data = self.train_data
+        shuffle = False
         if shuffle:
             random.shuffle(data)
         batch_num = len(data) // batch_size
