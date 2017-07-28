@@ -10,7 +10,6 @@ import data_utils
 import models
 from utils import *
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 parser = argparse.ArgumentParser()
@@ -32,6 +31,7 @@ arg('--batch-size', type=int, default=128)
 arg('--epoch-size', type=int, default=10)
 arg('--checkpoint-step', type=int, default=1, help='do validation and save after each this many of steps.')
 arg('--mode', type = str, default = "train")
+arg('--gpu', type = str, default = "0")
 args = parser.parse_args()
 
 
@@ -49,7 +49,8 @@ def main():
     else:
         dataloader = cPickle.load(open(dump_path, "rb"))
     print "train instance: ", len(dataloader.train_data)
-    print "vocab size: ", dataloader.vocab_size
+    print("vocab size: %d" % dataloader.vocab_size)
+    print("max fact num: %d" % dataloader.max_fact_num)
 
     print("start to build the model .. ")
     model = models.CompQAModel(vocab_size = dataloader.vocab_size,
@@ -106,5 +107,9 @@ def test():
     model.test(dataloader, args.model_path)
 
 if __name__ == '__main__':
+  if(args.gpu == "1"):
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+  else:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
   if(args.mode == "train"): main()
   else: test()

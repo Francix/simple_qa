@@ -108,9 +108,9 @@ class DataLoader(object):
         self.kb_entities = list(entities)
         print "kb relation size: ", len(self.kb_relations)
         print "kb entity size: ", len(self.kb_entities)
-        fil_kb_entities = [w for w in self.kb_entities if not w.startswith('_') and not w.startswith('<')]
+        self.fil_kb_entities = [w for w in self.kb_entities if not w.startswith('_') and not w.startswith('<')]
 
-        total_words = fil_words + self.kb_relations + fil_kb_entities
+        total_words = fil_words + self.kb_relations + self.fil_kb_entities
 
         self.vocab_list = [PAD, EOS, UNK, GO] + total_words
         self.vocab_size = len(self.vocab_list)

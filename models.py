@@ -14,6 +14,25 @@ import os
 import utils
 import data_utils
 
+def reduce_print(x):
+  if x == "_PAD": return colored("空", "green")
+  elif x == "_EOS": return colored("完", "yellow")
+  else: return x
+
+def postprocess(x):
+  x = list(x)
+  x.reverse()
+  i = 0
+  while(x[i] == 0):
+    i += 1
+  if(x[i] != 1):
+    if(i == 0):
+      x[i] = 1
+    else:
+      x[i - 1] = 1
+  x.reverse()
+  return x
+
 class CompQAModel(object):
     def __init__(self, vocab_size, embedding_size, max_src_len, max_des_len,
                  max_fact_num, state_size, num_layers, num_samples,
@@ -274,6 +293,8 @@ class CompQAModel(object):
 
             decoder_logits = []
             decoder_predicts = []
+            decoder_gold_logits = []
+            decoder_pred_logits = []
             outputs = []
             # look up embeddings for _GO
             prev = tf.nn.embedding_lookup(self.embeddings, tf.unstack(self.decoder_inputs)[0])
@@ -293,7 +314,7 @@ class CompQAModel(object):
                 if(self.is_train):
                     if(i == 0): print("inp shape:", inp.shape)
                     if(i != 0):
-                        inp = loop_function(prev, pred_modes)
+                        # inp = loop_function(prev, pred_modes)
                         if(i == 1): print("after loop function:", inp.shape)
                 # test here
                 # if(i != 0):
@@ -352,7 +373,9 @@ class CompQAModel(object):
                 common_truths = tf.cast(common_truths, tf.float32)
                 if(i == 0): print("common_truth shape: ", common_truths.shape)
                 sources_locs = tf.cast(sous_locs_seq[i], tf.float32)
+                if(i == 0): print("source_loc shape: ", sources_locs.shape)
                 kbkb_locs = tf.cast(kbkb_locs_seq[i], tf.float32)
+                if(i == 0): print("kbkb_locs shape: ", kbkb_locs.shape)
 
                 #用这时的mode进行预测
                 # common_truths = tf.transpose(tf.transpose(common_truths) * common_mode)
@@ -369,11 +392,13 @@ class CompQAModel(object):
 
                 verbose = False
                 if(i == 0): verbose = True
-                source_logit = source_atten_comp(tf.concat([state[0], state[1], hist_source_logit], 1), verbose)  # [batch, seq]
+                # Size = [batch, seq]
+                source_logit = source_atten_comp(tf.concat([state[0], state[1], hist_source_logit], 1), verbose)
                 hist_source_logit += source_logit
                 # hist_source_logit = source_logit
 
-                kbkb_logit = kbkb_atten_comp(tf.concat([state[0], state[1], hist_kbkb_logit], 1), verbose)  # [batch, fact]
+                # Size = [batch, fact]
+                kbkb_logit = kbkb_atten_comp(tf.concat([state[0], state[1], hist_kbkb_logit], 1), verbose)
                 hist_kbkb_logit += kbkb_logit
                 # hist_kbkb_logit = kbkb_logit
 
@@ -390,10 +415,13 @@ class CompQAModel(object):
                 entire_truths = tf.cast(entire_truths, tf.float32) #需要行和为1
                 entire_truths = tf.transpose(entire_truths) / (tf.reduce_sum(entire_truths, 1) + 1e-12)
                 entire_truths = tf.transpose(entire_truths)
-                source_crossent = tf.nn.softmax_cross_entropy_with_logits(labels = entire_truths, logits = entire_logit)
+                source_crossent = tf.nn.softmax_cross_entropy_with_logits(
+                    labels = entire_truths, logits = entire_logit)
                 decoder_loss.append(source_crossent * weights)
 
                 # 预测的时候
+                decoder_gold_logits.append(entire_truths)
+                decoder_pred_logits.append(entire_logit)
                 decoder_predicts.append(tf.arg_max(entire_logit, 1))
 
                 source_state = source_logit
@@ -407,6 +435,8 @@ class CompQAModel(object):
             self.decoder_outputs = outputs
             self.predict_truths = tf.stack(decoder_predicts)
             self.predict_modes = tf.one_hot(tf.argmax(tf.stack(decoder_predict_modes), axis = 2), 3)
+            self.pred_logits = tf.stack(decoder_pred_logits)
+            self.gold_logits = tf.stack(decoder_gold_logits)
             print("size of predict modes: ", self.predict_modes.shape)
         #####################################################################
 
@@ -447,11 +477,12 @@ class CompQAModel(object):
     def test(self, dataloader, model_dir):
         config = tf.ConfigProto(allow_soft_placement=True)
         config.gpu_options.allow_growth = True
+        batch_size = 120
         with tf.Session(config=config) as session:
             self.initilize(model_dir, session)
             gold_questions, pred_answers = list(), list()
             for ques, ques_lens, facts, resp, source, kbkb, modes, weights, ques_words, real_facts in \
-                    dataloader.get_batchs(data=dataloader.test_data, shuffle=False):
+                    dataloader.get_batchs(data=dataloader.test_data, batch_size = batch_size, shuffle=False):
                 feed = dict()
                 feed[self.encoder_inputs] = ques
                 feed[self.encoder_lengths] = ques_lens
@@ -465,8 +496,12 @@ class CompQAModel(object):
                 feed[self.keep_prob] = 1.0
                 decoder_predicts = session.run([self.predict_truths], feed)
                 decoder_predicts = decoder_predicts[0]
+                # test here
+                # self.answer_measure(decoder_predicts, resp, 20, dataloader, True)
+                # return
 
                 predicts = np.transpose(decoder_predicts)
+                resp = resp[1:]
                 gold_ouputs = np.transpose(resp)
                 gold_inputs = np.transpose(ques)
 
@@ -476,11 +511,14 @@ class CompQAModel(object):
                     input, output, predict = gold_inputs[i], gold_ouputs[i], predicts[i]
                     q_words, facts = ques_words[i], real_facts[i]
                     words = list()
+                    predict = postprocess(predict)
                     for id in predict:
-                        if id in [data_utils.EOS_ID, data_utils.PAD_ID]:
-                            break
+                        if id == data_utils.EOS_ID:
+                          break
                         if id < dataloader.vocab_size:
                             words.append(dataloader.vocab_list[id])
+                        # else:
+                        #     words.append(dataloader.vocab_list[0])
                         elif id < dataloader.vocab_size + dataloader.max_q_len:
                             q_id = id - dataloader.vocab_size
                             words.append(q_words[q_id])
@@ -490,10 +528,13 @@ class CompQAModel(object):
 
                     gold_questions.append(''.join(ques_words[i])) #真实问题
                     pred_answers.append(''.join(words)) #预测结果
-                    print('question: %s\ngolden: %s\npredict: %s' % (
-                      utils.ids_to_sentence(input.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
-                      utils.ids_to_sentence(output.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
-                      ''.join(words)))
+                    pred_tmp = " ".join([reduce_print(j) for j in words])
+                    gold_tmp = " ".join([reduce_print(dataloader.vocab_list[j]) for j in output])
+                    # print('question: %s\ngolden:  %s\npredict: %s' % (
+                    #   utils.ids_to_sentence(input.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
+                    #   gold_tmp, pred_tmp))
+                      # utils.ids_to_sentence(output.tolist(), dataloader.vocab_list, data_utils.EOS_ID, ''),
+                      # ''.join(words)))
                 # break
             #开始测试
             import evaluation
@@ -518,12 +559,12 @@ class CompQAModel(object):
                 feed)
             return predict_modes, predict_truths, loss, decoder_loss, mode_loss
         else:
-            predict_modes, predict_truths, loss = session.run([self.predict_modes, self.predict_truths, self.loss],
-                feed)
+            predict_modes, predict_truths, loss, gold_logits, pred_logits = session.run(
+                [self.predict_modes, self.predict_truths, self.loss, self.gold_logits, self.pred_logits], feed)
             # predict_truths = np.transpose(predict_truths)
             # print '\n'.join(utils.ids_to_sentence(predict_truths.tolist(),
             #                                       dataloader.vocab_list, data_utils.EOS_ID, ''))
-            return predict_modes, predict_truths, loss
+            return predict_modes, predict_truths, loss, gold_logits, pred_logits
 
     def get_answer_lens(self, ans):
       ans = np.transpose(ans)
@@ -661,7 +702,7 @@ class CompQAModel(object):
       ret["confusion_matrix"] = confusion_matrix
       return ret
 
-    def answer_measure(self, pred, gold, anslens, batch_size, dataloader, verbose = False):
+    def answer_measure(self, pred, gold, batch_size, dataloader, verbose = False):
       pred = np.transpose(pred)
       gold = gold[1:]
       gold = np.transpose(gold)
@@ -669,10 +710,10 @@ class CompQAModel(object):
       pred[indices] = 0
       correct_predicted = np.sum(pred == gold)
       total_ans = pred.shape[0] * pred.shape[1]
-      def reduce_print(x):
-        if x == "_PAD": return colored("空", "green")
-        elif x == "_EOS": return colored("完", "yellow")
-        else: return x
+      # print("pred: ", pred.shape)
+      # print(pred)
+      # print("gold: ", gold.shape)
+      # print(gold)
       if(verbose):
         # print("pred / gold")
         # print '\n'.join(utils.ids_to_sentence(total_ans.tolist(), dataloader.vocab_list))
@@ -689,6 +730,98 @@ class CompQAModel(object):
         # print(gold)
         # print '\n'.join(utils.ids_to_sentence(gold.tolist(), dataloader.vocab_list))
       # size = [maxlen, batch_size]
+      return
+
+    # if I predict this mode, whether I get it right
+    def knowledge_measure(self, pred_truth, pred_mode, gold_src, gold_kb, gold_mode, gold_logits, pred_logits):
+      def parse_pred_kb(pred_truth):
+        # return pred_truth
+        return pred_truth - self.vocab_size - self.max_src_len
+      def parse_pred_src(pred_truth):
+        # return pred_truth
+        return pred_truth - self.vocab_size
+      print("---- measurement for knowledge and source location prediction")
+      # Size: [timestep, batch_size, totallen] -> [batch_size, timestep, totallen]
+      gold_logits = np.transpose(gold_logits, [1, 0, 2])
+      pred_logits = np.transpose(pred_logits, [1, 0, 2])
+      # After: size = [batch_size, time_step]
+      pred_truth = np.transpose(pred_truth)
+      # Size: [timestep, input_length, batch_size] -> [batch_size, time_step, input_length]
+      gold_src = gold_src[: -1]
+      gold_kb = gold_kb[: -1]
+      gold_src = np.transpose(gold_src, [2, 0, 1])
+      gold_kb = np.transpose(gold_kb, [2, 0, 1])
+      # transform to index
+      gold_src = np.argmax(gold_src, axis = 2)
+      gold_kb = np.argmax(gold_kb, axis = 2)
+      # Size: [batch_size, timestep]
+      pred_kb = parse_pred_kb(pred_truth)
+      pred_src = parse_pred_src(pred_truth)
+      # After size: [batch_size, timestep]
+      pred_mode = np.argmax(np.transpose(pred_mode, [1, 0, 2]).astype(int), axis = 2)
+      gold_mode = gold_mode[: -1]
+      gold_mode = np.argmax(np.transpose(gold_mode, [2, 0, 1]), axis = 2)
+      # test
+      #print(" ---- pred_kb")
+      #print(pred_kb)
+      #print(" ---- pred_src")
+      #print(pred_src)
+      #print(" ---- pred_mode")
+      #print(pred_mode)
+      #print(" ---- gold_src")
+      #print(gold_src)
+      #print(" ---- gold_kb")
+      #print(gold_kb)
+      #print(" ---- gold_mode")
+      #print(gold_mode)
+      total_kb = 0
+      total_src = 0
+      correct_src = 0
+      correct_kb = 0
+      def show_pred_sentence(pred_mode, gold_mode, pred_src, gold_src, pred_kb, gold_kb):
+        print("pred mode: ", pred_mode)
+        print("gold mode: ", gold_mode)
+        len_sent = len(pred_mode)
+        tmp_pred_src = np.array(pred_src)
+        tmp_gold_src = np.array(gold_src)
+        tmp_pred_kb = np.array(pred_kb)
+        tmp_gold_kb = np.array(gold_kb)
+        for j in range(len_sent):
+          if(pred_mode[j] == 0):
+            tmp_pred_src[j] = -1
+            tmp_pred_kb[j] = -1
+          if(gold_mode[j] == 0):
+            tmp_gold_src[j] = -1
+            tmp_gold_kb[j] = -1
+        print("    pred src: ", tmp_pred_src)
+        print("    gold src: ", tmp_gold_src)
+        print("    pred kb: ", tmp_pred_kb)
+        print("    gold kb: ", tmp_gold_kb)
+        return
+      for i in range(np.shape(pred_mode)[0]):
+        show_pred_sentence(pred_mode[i], gold_mode[i], pred_src[i], gold_src[i], pred_kb[i], gold_kb[i])
+        # print("pred mode: ", pred_mode[i])
+        # print("gold mode: ", gold_mode[i])
+        # print("    pred src: ", pred_src[i])
+        # print("    gold src: ", gold_src[i])
+        # print("    pred kb:  ", pred_kb[i])
+        # print("    gold kb:  ", gold_kb[i])
+        # print("pred logits: ")
+        # print(pred_logits[i])
+        # print("gold logits: ")
+        # print(gold_logits[i])
+        # print("")
+        for j in range(np.shape(pred_mode)[1]):
+          # src
+          if(gold_mode[i][j] == 1):
+            total_src += 1
+            if(pred_mode[i][j] == 1 and pred_src[i][j] == gold_src[i][j]): correct_src += 1
+          # kb
+          elif(gold_mode[i][j] == 2):
+            total_kb += 2
+            if(pred_mode[i][j] == 2 and pred_kb[i][j] == gold_kb[i][j]): correct_kb += 1
+      print("accuracy for src prediction: %.4f" % (float(correct_src) / total_src))
+      print("accuracy for kb prediction: %.4f" % (float(correct_kb) / total_kb))
       return
 
     def fit(self, dataloader, batch_size, epoch_size, step_per_checkpoint, model_dir):
@@ -764,16 +897,16 @@ class CompQAModel(object):
                         loss_run = 0
                         decoder_loss_run = 0
                         mode_loss_run = 0
-                        # self.saver.save(session, os.path.join(model_dir, 'checkpoint'), global_step = self.global_step)
-                        for _ques, _ques_lens, _facts, _resp, _source, \
-                          _kbkb, _modes, _weights, _, _ in \
+                        # self.saver.save(session, os.path.join(model_dir, 'checkpoint'), 
+                        # global_step = self.global_step)
+                        for _ques, _ques_lens, _facts, _resp, _source, _kbkb, _modes, _weights, _, _ in \
                           dataloader.get_valid_batchs(20):
-                            predict_modes, predict_truths, step_loss = self.step(_ques, _ques_lens, _facts,
-                                                                  _resp, _source, _kbkb, _modes, _weights,
-                                                                  False, session, dataloader)
+                            predict_modes, predict_truths, step_loss, gold_logits, pred_logits = self.step(
+                                _ques, _ques_lens, _facts, _resp, _source, _kbkb, _modes, _weights,
+                                False, session, dataloader)
                             anslens = self.get_answer_lens(_resp)
-                            validation_measure = self.mode_measure(predict_modes, _modes, anslens, 20, True)
-                            # validation_answer_measure = self.answer_measure(predict_truths, _resp, _ques_lens, 20)
+                            validation_measure = self.mode_measure(
+                                np.array(predict_modes), np.array(_modes), anslens, 20, True)
                             print("-- measurement for validation mode")
                             print("common mode: prec = %.4f, recl = %.4f, f1 = %.4f, acc = %.4f" %
                                 (validation_measure["c_prec"], validation_measure["c_recl"],
@@ -789,7 +922,11 @@ class CompQAModel(object):
                             print("k - tp/ tn/ fp/ fn/ total", validation_measure["k"])
                             print("confusion matrix:")
                             print(validation_measure["confusion_matrix"])
-                            self.answer_measure(predict_truths, _resp, _ques_lens, 20, dataloader, True)
+                            self.answer_measure(
+                                np.array(predict_truths), np.array(_resp), 20, dataloader, True)
+                            self.knowledge_measure(
+                                np.array(predict_truths), np.array(predict_modes), np.array(_source),
+                                np.array(_kbkb), np.array(_modes), np.array(gold_logits), np.array(pred_logits))
                             print "validation-loss %.5f" % step_loss
                             print("")
                             # self.saver.save(session, model_dir + 'model.ckpt', global_step = run_id)

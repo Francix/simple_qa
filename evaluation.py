@@ -91,6 +91,7 @@ def correct_props(preds, golds):
 
 
 def eval(predicts, kbs=None):
+    print("starting evaluation ... ")
     if kbs is None:
         kbs = load_kb()
     questions, answers = list(), list()
@@ -107,6 +108,8 @@ def eval(predicts, kbs=None):
     r_num, t_num = 0, 0
     recall = 0
     for ques, answ, pred in zip(questions, answers, predicts):
+        print("answ: %s" % answ)
+        print("pred: %s" % pred)
         kb_facts = kbs[extract_ent(ques)]  # 这是的事实
         real_facts = extract_facts(answ)
         pred_facts = extract_facts(pred)
